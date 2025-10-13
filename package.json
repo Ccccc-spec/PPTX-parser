@@ -31,8 +31,16 @@
     "office",
     "framework-agnostic"
   ],
-  "author": "Your Name <your.email@example.com>",
+  "author": "lurengu <2841816585@qq.com>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ccccc-spec/PPTX-parser.git"
+  },
+  "homepage": "https://github.com/Ccccc-spec/PPTX-parser#readme",
+  "bugs": {
+    "url": "https://github.com/Ccccc-spec/PPTX-parser/issues"
+  },
   "dependencies": {
     "pptxtojson": "^1.6.0"
   },
