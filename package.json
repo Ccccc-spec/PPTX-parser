@@ -1,6 +1,6 @@
 {
   "name": "pptx-json-parser",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Parse PPTX files to structured JSON data for rendering in any framework",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
