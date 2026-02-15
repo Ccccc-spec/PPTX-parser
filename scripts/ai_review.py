@@ -1,76 +1,123 @@
 import os
-import requests # type: ignore
-from openai import OpenAI # type: ignore
+import requests  # type: ignore
+from openai import OpenAI  # type: ignore
 
 # ---------- 配置 ----------
 MAX_TOKENS = 3000
 DEBUG = True
 AI_MARKER = "## 🤖 AI Code Review"
+
+# 严谨的模型候选列表 (基于 2026 OpenRouter 最新文档)
+# 优先级：2.0 Flash 正式版 > 2.0 Flash 思考版 > 1.5 Flash 稳定版
+MODEL_CANDIDATES = [
+    "google/gemini-2.0-flash-001",
+    "google/gemini-2.0-flash-thinking-exp:free",
+    "google/gemini-flash-1.5",
+]
 # ------------------------
 
 def main():
+    # 从环境变量获取参数
     repo = os.environ.get("REPO")
     pr_number = os.environ.get("PR_NUMBER")
     token = os.environ.get("GITHUB_TOKEN")
     api_key = os.environ.get("LLM_API_KEY")
 
-    client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    if not all([repo, pr_number, token, api_key]):
+        print("[ERROR] 缺少必要的环境变量 (REPO, PR_NUMBER, GITHUB_TOKEN, LLM_API_KEY)")
+        return
 
-    # 1. 清理该 PR 之前的旧 AI 评论 (保持页面整洁)
-    # 这样当你有新 Commit 时，旧的 Review 建议会被删掉，换成针对最新代码的建议
+    # 初始化 OpenRouter 客户端
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1",
+        default_headers={
+            "HTTP-Referer": "https://github.com/ai-review-action", # OpenRouter 要求的标识
+            "X-Title": "AI PR Reviewer",
+        }
+    )
+    
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+    # 1. 清理该 PR 之前的旧 AI 评论
     comments_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
-    old_comments = requests.get(comments_url, headers=headers).json()
-    for comment in old_comments:
-        if AI_MARKER in comment.get("body", ""):
-            requests.delete(comment["url"], headers=headers)
-            if DEBUG: print(f"[INFO] Deleted old AI comment: {comment['id']}")
+    try:
+        old_comments = requests.get(comments_url, headers=headers).json()
+        for comment in old_comments:
+            if AI_MARKER in comment.get("body", ""):
+                requests.delete(comment["url"], headers=headers)
+                if DEBUG: print(f"[INFO] 已清理旧的 AI 评论: {comment['id']}")
+    except Exception as e:
+        print(f"[WARN] 清理旧评论失败: {e}")
 
-    # 2. 获取 PR 的整体 Diff (Base vs Head)
-    # 注意：这里获取的是整个 PR 累计的变动，不是单个 commit 的变动
+    # 2. 获取 PR 的整体累计 Diff (Base vs Head)
+    # 这确保了 AI 看到的是“最终合并态”，忽略中间 Commit 的反复修改
     diff_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
     diff_headers = headers.copy()
     diff_headers["Accept"] = "application/vnd.github.v3.diff"
     
-    diff_res = requests.get(diff_url, headers=diff_headers)
-    full_diff = diff_res.text
-
-    # 3. 构建更聪明的 Prompt
-    # 告诉 AI 忽略中间过程，只看最终结果
-    prompt = f"""
-作为高级工程师，请审查此拉取请求的最终汇总更改。
-忽略后续提交中修正的任何中间错误。
-重点关注：
-- 最终状态下的逻辑缺陷和边缘情况。
-- 性能和安全性。
-- 代码风格和可维护性。
-先给出一个概要性的总结，然后给出基于文件的具体建议。
-PR 详情说明：
-{full_diff[:15000]} 
-"""
-    # 注：15000字符约为 4k-5k tokens，Gemini 2.0 Flash 足够处理
     try:
+        diff_res = requests.get(diff_url, headers=diff_headers)
+        diff_res.raise_for_status()
+        full_diff = diff_res.text
+    except Exception as e:
+        print(f"[ERROR] 获取 Diff 失败: {e}")
+        return
+
+    # 3. 构建 Prompt
+    prompt = f"""
+作为一名资深的软件工程师，请你对这份拉取请求（PR）的【最终汇总改动】进行代码审查。
+请忽略中间提交中已经修复的错误，只针对当前的最终代码状态提出建议。
+
+审查要求：
+1. 逻辑缺陷：是否存在边界条件处理不当、潜在的内存泄漏或死锁？
+2. 性能优化：是否有更高效的算法或不必要的计算？
+3. 安全性：是否存在 SQL 注入、敏感信息泄露或鉴权漏洞？
+4. 可维护性：变量命名是否清晰？代码是否过于复杂？符合 clean code 原则吗？
+
+请先给出一个【总体评价】，然后按文件列出具体的【改进建议】。
+
+代码 Diff 内容：
+{full_diff[:18000]} 
+"""
+
+    # 4. 尝试调用 LLM (多模型容错逻辑)
+    ai_suggestion = None
+    last_error = ""
+
+    for model_id in MODEL_CANDIDATES:
+        try:
+            if DEBUG: print(f"[INFO] 正在尝试调用模型: {model_id}")
             response = client.chat.completions.create(
-                # 选项 A: OpenRouter 目前最通用的 2.0 Flash 路径
-                model="google/gemini-2.0-flash-exp:free", 
-                
-                # 或者选项 B (如果上面的不行):
-                # model="google/gemini-flash-1.5", 
-                
+                model=model_id,
                 messages=[
-                    {"role": "system", "content": "你是一位务实且专业的代码审查员。你只关心这个 PR 的最终结果。"},
+                    {"role": "system", "content": "你是一位务实、犀利且专业的代码审查专家。"},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.2,
+                temperature=0.1, # 保持输出的确定性和专业性
             )
             ai_suggestion = response.choices[0].message.content
-    except Exception as e:
-        ai_suggestion = f"❌ AI Review failed during processing: {str(e)}"
+            if DEBUG: print(f"[INFO] 模型 {model_id} 调用成功")
+            break 
+        except Exception as e:
+            last_error = str(e)
+            print(f"[WARN] 模型 {model_id} 失败: {last_error}")
+            continue
 
-    # 4. 发布全新的 Review 评论
-    full_body = f"{AI_MARKER}\n\n> 💡 *This review is based on the latest commit in this PR.*\n\n{ai_suggestion}"
-    requests.post(comments_url, headers=headers, json={"body": full_body})
-    print("[INFO] New AI review posted.")
+    if not ai_suggestion:
+        ai_suggestion = f"❌ AI 审查调用失败。尝试了所有模型，最后的错误信息为: {last_error}"
+
+    # 5. 发布全新的 Review 评论
+    full_body = f"{AI_MARKER}\n\n> 💡 *此审查基于该 PR 的最新代码状态（汇总了所有 Commit 的改动）。*\n\n{ai_suggestion}"
+    
+    post_res = requests.post(comments_url, headers=headers, json={"body": full_body})
+    if post_res.status_code == 201:
+        print("[INFO] 新的 AI 审查建议已成功发布。")
+    else:
+        print(f"[ERROR] 发布评论失败: {post_res.status_code} {post_res.text}")
 
 if __name__ == "__main__":
     main()
