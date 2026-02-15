@@ -2,6 +2,7 @@ name: AI PR Review
 
 on:
   pull_request:
+    # synchronize 确保了当有新 commit push 到该 PR 时，Action 会重新跑
     types: [opened, synchronize]
 
 jobs:
@@ -14,6 +15,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整历史以更好地处理 diff
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -23,11 +26,12 @@ jobs:
       - name: Install dependencies
         run: pip install openai requests
 
-      - name: Run AI Review Script
+      - name: Run AI Review
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-        # 核心变动在这里：直接运行脚本文件
+          # 告诉脚本这是一次更新提交
+          EVENT_ACTION: ${{ github.event.action }} 
         run: python scripts/ai_review.py

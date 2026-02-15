@@ -1,11 +1,11 @@
 import os
-import requests  # type: ignore
-from openai import OpenAI  # type: ignore
+import requests # type: ignore
+from openai import OpenAI # type: ignore
 
 # ---------- 配置 ----------
-MAX_TOKENS = 2000
-CHUNK_SIZE = 5000
+MAX_TOKENS = 3000
 DEBUG = True
+AI_MARKER = "## 🤖 AI Code Review"
 # ------------------------
 
 def main():
@@ -14,77 +14,59 @@ def main():
     token = os.environ.get("GITHUB_TOKEN")
     api_key = os.environ.get("LLM_API_KEY")
 
-    if not all([repo, pr_number, token, api_key]):
-        print("[ERROR] Missing environment variables.")
-        return
+    client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
-    # 初始化 OpenRouter 客户端
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://openrouter.ai/api/v1",
-    )
+    # 1. 清理该 PR 之前的旧 AI 评论 (保持页面整洁)
+    # 这样当你有新 Commit 时，旧的 Review 建议会被删掉，换成针对最新代码的建议
+    comments_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+    old_comments = requests.get(comments_url, headers=headers).json()
+    for comment in old_comments:
+        if AI_MARKER in comment.get("body", ""):
+            requests.delete(comment["url"], headers=headers)
+            if DEBUG: print(f"[INFO] Deleted old AI comment: {comment['id']}")
 
-    # 获取 PR diff
-    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3.diff"
-    }
-
-    r = requests.get(url, headers=headers)
-    r.raise_for_status()
-    full_diff = r.text
-
-    if DEBUG:
-        print(f"[INFO] Total diff length: {len(full_diff)} chars")
-
-    # 拆分 diff 为文件块
-    files = full_diff.split("diff --git")
-    chunks = []
-    for f in files[1:]:
-        for i in range(0, len(f), CHUNK_SIZE):
-            chunks.append(f[i:i+CHUNK_SIZE])
-
-    # 防止重复评论
-    existing_comments = requests.get(
-        f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
-        headers={"Authorization": f"token {token}"}
-    ).json()
-
-    ai_comment_marker = "## 🤖 AI Code Review"
-    if any(ai_comment_marker in c.get("body","") for c in existing_comments):
-        print("[INFO] AI review already exists. Skipping.")
-        return
-
-    # 调用 LLM
-    reviews = []
-    for idx, chunk in enumerate(chunks, start=1):
-        prompt = f"Analyze this code diff chunk for bugs and performance:\n\n{chunk}"
-        try:
-            response = client.chat.completions.create(
-                model="google/gemini-2.5-flash",
-                messages=[
-                    {"role": "system", "content": "You are an expert code reviewer."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.7,
-                max_tokens=MAX_TOKENS,
-            )
-            review_text = response.choices[0].message.content
-            reviews.append(f"### Chunk {idx}\n{review_text}")
-        except Exception as e:
-            reviews.append(f"### Chunk {idx}\n❌ AI Review failed: {str(e)}")
-
-    # 合并并发布
-    full_review = ai_comment_marker + "\n\n" + "\n\n".join(reviews)
-    res = requests.post(
-        f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
-        headers={"Authorization": f"token {token}"},
-        json={"body": full_review},
-    )
+    # 2. 获取 PR 的整体 Diff (Base vs Head)
+    # 注意：这里获取的是整个 PR 累计的变动，不是单个 commit 的变动
+    diff_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+    diff_headers = headers.copy()
+    diff_headers["Accept"] = "application/vnd.github.v3.diff"
     
-    if res.status_code == 201:
-        print("[INFO] AI review posted successfully.")
+    diff_res = requests.get(diff_url, headers=diff_headers)
+    full_diff = diff_res.text
+
+    # 3. 构建更聪明的 Prompt
+    # 告诉 AI 忽略中间过程，只看最终结果
+    prompt = f"""
+作为高级工程师，请审查此拉取请求的最终汇总更改。
+忽略后续提交中修正的任何中间错误。
+重点关注：
+- 最终状态下的逻辑缺陷和边缘情况。
+- 性能和安全性。
+- 代码风格和可维护性。
+先给出一个概要性的总结，然后给出基于文件的具体建议。
+PR 详情说明：
+{full_diff[:15000]} 
+"""
+    # 注：15000字符约为 4k-5k tokens，Gemini 2.0 Flash 足够处理
+
+    try:
+        response = client.chat.completions.create(
+            model="google/gemini-2.0-flash", # 建议用 2.0 Flash，速度快且逻辑强
+            messages=[
+                {"role": "system", "content": "You are a pragmatic, expert code reviewer. You only care about the final result of the PR."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2, # 降低随机性，让 Review 更严谨
+        )
+        ai_suggestion = response.choices[0].message.content
+    except Exception as e:
+        ai_suggestion = f"❌ AI Review failed during processing: {str(e)}"
+
+    # 4. 发布全新的 Review 评论
+    full_body = f"{AI_MARKER}\n\n> 💡 *This review is based on the latest commit in this PR.*\n\n{ai_suggestion}"
+    requests.post(comments_url, headers=headers, json={"body": full_body})
+    print("[INFO] New AI review posted.")
 
 if __name__ == "__main__":
     main()
