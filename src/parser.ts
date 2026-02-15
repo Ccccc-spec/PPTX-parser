@@ -51,6 +51,17 @@ function parseLineElement(el: Element, ratio: number): any {
     strokeWidth: (el.strokeWidth || 1) * ratio,
     style: 'solid',
     points: el.points || ['', ''],
+    broken: el.broken || [0, 0],
+    broken2: el.broken2 || [0, 0],
+    curve: el.curve || [0, 0],
+    cubic: el.cubic || [[0, 0], [0, 0]],
+    dash: el.dash || [0, 0],
+    dashPhase: el.dashPhase || 0,
+    dashLength: el.dashLength || 0,
+    dashOffset: el.dashOffset || 0,
+    dashArray: el.dashArray || [0, 0],
+    dashCap: el.dashCap || 'butt',
+    dashJoin: el.dashJoin || 'miter',
   };
 }
 
