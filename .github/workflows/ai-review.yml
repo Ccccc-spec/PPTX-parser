@@ -1,0 +1,152 @@
+name: AI PR Review (OpenRouter - Advanced)
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  ai_review:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install openai requests
+
+      - name: Run AI Review
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          python <<EOF
+import os
+import requests
+from openai import OpenAI
+
+# ---------- 配置 ----------
+MAX_TOKENS = 2000       # 每次调用 LLM 最大 token
+CHUNK_SIZE = 5000       # diff 每块字符数
+DEBUG = True            # 是否打印日志
+# ------------------------
+
+repo = os.environ["REPO"]
+pr_number = os.environ["PR_NUMBER"]
+token = os.environ["GITHUB_TOKEN"]
+
+# 初始化 OpenRouter 客户端
+client = OpenAI(
+    api_key=os.environ["LLM_API_KEY"],
+    base_url="https://openrouter.ai/api/v1",
+)
+
+# 获取 PR diff
+diff_file = "pr.diff"
+url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+headers = {
+    "Authorization": f"token {token}",
+    "Accept": "application/vnd.github.v3.diff"
+}
+
+r = requests.get(url, headers=headers)
+r.raise_for_status()
+with open(diff_file, "w", encoding="utf-8") as f:
+    f.write(r.text)
+
+with open(diff_file, "r", encoding="utf-8") as f:
+    full_diff = f.read()
+
+if DEBUG:
+    print(f"[INFO] Total diff length: {len(full_diff)} chars")
+
+# 拆分 diff 为文件块
+# 假设 diff 按文件以 "diff --git" 分隔
+files = full_diff.split("diff --git")
+chunks = []
+for f in files[1:]:  # 第一个可能为空
+    # 以 CHUNK_SIZE 拆分
+    for i in range(0, len(f), CHUNK_SIZE):
+        chunks.append(f[i:i+CHUNK_SIZE])
+
+if DEBUG:
+    print(f"[INFO] Total chunks: {len(chunks)}")
+
+# 防止重复评论
+# 拉取现有评论，检查 AI 是否已经评论过该 PR
+existing_comments = requests.get(
+    f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+    headers={"Authorization": f"token {token}"}
+).json()
+
+ai_comment_marker = "## 🤖 AI Code Review"
+if any(ai_comment_marker in c.get("body","") for c in existing_comments):
+    print("[INFO] AI review already exists. Skipping.")
+    exit(0)
+
+# 调用 LLM 对每块进行 review
+reviews = []
+for idx, chunk in enumerate(chunks, start=1):
+    prompt = f"""
+You are a senior software engineer performing a code review.
+
+Please analyze the following code diff chunk:
+
+1. Potential bugs
+2. Code improvements
+3. Performance issues
+4. Security concerns
+
+Be concise and structured. Label as Chunk {idx}.
+
+Diff:
+{chunk}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="google/gemini-2.5-flash",
+            messages=[
+                {"role": "system", "content": "You are an expert code reviewer."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=MAX_TOKENS,
+        )
+        review_text = response.choices[0].message.content
+        reviews.append(f"### Chunk {idx}\n{review_text}")
+        if DEBUG:
+            print(f"[INFO] Completed chunk {idx}")
+    except Exception as e:
+        reviews.append(f"### Chunk {idx}\n❌ AI Review failed: {str(e)}")
+        print(f"[ERROR] Chunk {idx} failed: {str(e)}")
+
+# 合并所有 chunk 评论
+full_review = ai_comment_marker + "\n\n" + "\n\n".join(reviews)
+
+# 发到 PR
+res = requests.post(
+    f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+    headers={
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+    },
+    json={"body": full_review},
+)
+
+if res.status_code == 201:
+    print("[INFO] AI review posted successfully.")
+else:
+    print(f"[ERROR] Failed to post AI review: {res.status_code} {res.text}")
+EOF
