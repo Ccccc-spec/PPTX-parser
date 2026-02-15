@@ -49,17 +49,21 @@ PR 详情说明：
 {full_diff[:15000]} 
 """
     # 注：15000字符约为 4k-5k tokens，Gemini 2.0 Flash 足够处理
-
     try:
-        response = client.chat.completions.create(
-            model="google/gemini-2.0-flash", # 建议用 2.0 Flash，速度快且逻辑强
-            messages=[
-                {"role": "system", "content": "You are a pragmatic, expert code reviewer. You only care about the final result of the PR."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2, # 降低随机性，让 Review 更严谨
-        )
-        ai_suggestion = response.choices[0].message.content
+            response = client.chat.completions.create(
+                # 选项 A: OpenRouter 目前最通用的 2.0 Flash 路径
+                model="google/gemini-2.0-flash-exp:free", 
+                
+                # 或者选项 B (如果上面的不行):
+                # model="google/gemini-flash-1.5", 
+                
+                messages=[
+                    {"role": "system", "content": "你是一位务实且专业的代码审查员。你只关心这个 PR 的最终结果。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            ai_suggestion = response.choices[0].message.content
     except Exception as e:
         ai_suggestion = f"❌ AI Review failed during processing: {str(e)}"
 
