@@ -72,11 +72,9 @@ if DEBUG:
     print(f"[INFO] Total diff length: {len(full_diff)} chars")
 
 # 拆分 diff 为文件块
-# 假设 diff 按文件以 "diff --git" 分隔
 files = full_diff.split("diff --git")
 chunks = []
-for f in files[1:]:  # 第一个可能为空
-    # 以 CHUNK_SIZE 拆分
+for f in files[1:]:
     for i in range(0, len(f), CHUNK_SIZE):
         chunks.append(f[i:i+CHUNK_SIZE])
 
@@ -84,7 +82,6 @@ if DEBUG:
     print(f"[INFO] Total chunks: {len(chunks)}")
 
 # 防止重复评论
-# 拉取现有评论，检查 AI 是否已经评论过该 PR
 existing_comments = requests.get(
     f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
     headers={"Authorization": f"token {token}"}
@@ -113,7 +110,6 @@ Be concise and structured. Label as Chunk {idx}.
 Diff:
 {chunk}
 """
-
     try:
         response = client.chat.completions.create(
             model="google/gemini-2.5-flash",
